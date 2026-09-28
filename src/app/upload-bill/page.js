@@ -2,98 +2,71 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import Tesseract from "tesseract.js";
 
-const AMOUNT_REGEX = /\b\d{1,3}(?:,\d{3})*\.\d{2}\b/;
+const MAX_IMAGE_DIMENSION = 1600;
 
-function parseBillData(rawText) {
-  const text = (rawText || "").replace(/\r/g, " ").replace(/\s+/g, " ").trim();
+function normalizeFieldValue(value) {
+  if (value === null || value === undefined) return "";
+  return String(value).trim();
+}
 
-  const lines = (rawText || "")
-    .split(/\n|\r/)
-    .map((line) => line.replace(/\s+/g, " ").trim())
-    .filter(Boolean);
+async function shrinkImageIfNeeded(file) {
+  if (!file || !file.type || !file.type.startsWith("image/")) {
+    return file;
+  }
 
-  // 1. Locate the item table: header row -> first totals row
-  const headerIdx = lines.findIndex(
-    (l) => /description/i.test(l) && /(hsn|qty|amount)/i.test(l),
+  const image = await new Promise((resolve, reject) => {
+    const url = URL.createObjectURL(file);
+    const img = new Image();
+    img.onload = () => {
+      URL.revokeObjectURL(url);
+      resolve(img);
+    };
+    img.onerror = () => {
+      URL.revokeObjectURL(url);
+      reject(new Error("Failed to read image."));
+    };
+    img.src = url;
+  });
+
+  const { width, height } = image;
+  const maxDimension = Math.max(width, height);
+  if (maxDimension <= MAX_IMAGE_DIMENSION) {
+    return file;
+  }
+
+  const scale = MAX_IMAGE_DIMENSION / maxDimension;
+  const canvas = document.createElement("canvas");
+  canvas.width = Math.round(width * scale);
+  canvas.height = Math.round(height * scale);
+
+  const context = canvas.getContext("2d");
+  context.drawImage(image, 0, 0, canvas.width, canvas.height);
+
+  const blob = await new Promise((resolve) =>
+    canvas.toBlob((nextBlob) => resolve(nextBlob), "image/jpeg", 0.85),
   );
-  const endIdx =
-    headerIdx === -1
-      ? -1
-      : lines.findIndex(
-          (l, i) =>
-            i > headerIdx &&
-            /^(taxable|sub\s*total|total|discount|cgst|sgst|igst)/i.test(l),
-        );
 
-  let productName = null;
-  let amount = null;
-  let hsn = null;
-
-  if (headerIdx !== -1 && endIdx > headerIdx + 1) {
-    // Join all wrapped lines of the item row(s)
-    let block = lines.slice(headerIdx + 1, endIdx).join(" ");
-
-    // Amount: decimal number like 699.00 (first one in the row)
-    const amountMatch = block.match(AMOUNT_REGEX);
-    if (amountMatch) {
-      amount = amountMatch[0].replace(/,/g, "");
-      block = block.replace(amountMatch[0], " ");
-    }
-
-    // HSN/SAC: standalone 4-8 digit number
-    const hsnMatch = block.match(/\b\d{4,8}\b/);
-    if (hsnMatch) {
-      hsn = hsnMatch[0];
-      block = block.replace(hsnMatch[0], " ");
-    }
-
-    productName = block
-      .replace(/^[\s|#]*\d{1,2}[\s.|)]+/, "") // leading row number "1"
-      .replace(/[|]/g, " ") // stray table borders OCR picks up
-      .replace(/\s+/g, " ")
-      .trim();
-
-    if (productName.length < 4) productName = null;
-  }
-
-  // 2. Fallback: keyword-based search if the table wasn't found
-  if (!productName) {
-    const line = lines.find((l) =>
-      /(membership|workout|session|trial|fitness|gym|package|course|service)/i.test(
-        l,
-      ),
-    );
-    if (line) {
-      const amountMatch = line.match(AMOUNT_REGEX);
-      if (amountMatch && !amount) amount = amountMatch[0].replace(/,/g, "");
-
-      productName = line
-        .replace(/^\d{1,2}\s+/, "")
-        .replace(/\b\d{4,8}\b/g, "")
-        .replace(/\b\d{1,3}(?:,\d{3})*\.\d{2}\b/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-    }
-  }
-
-  return {
-    rawText: text,
-    productName,
-    amount,
-    hsn,
-    textPreview: text.toLowerCase().slice(0, 500),
-  };
+  return new File([blob], file.name.replace(/\.[^.]+$/, ".jpg"), {
+    type: "image/jpeg",
+    lastModified: Date.now(),
+  });
 }
 
 export default function UploadBillPage() {
   const router = useRouter();
   const [lead, setLead] = useState(null);
   const [file, setFile] = useState(null);
-  const [parsed, setParsed] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
-  const [ocrStatus, setOcrStatus] = useState("");
+  const [status, setStatus] = useState("");
+  const [fields, setFields] = useState({
+    productName: "",
+    amount: "",
+    mrp: "",
+    discountPercent: "",
+    invoiceNumber: "",
+    date: "",
+  });
 
   useEffect(() => {
     const raw = sessionStorage.getItem("billUnlockLead");
@@ -102,70 +75,101 @@ export default function UploadBillPage() {
     }
   }, []);
 
+  const updateField = (key, value) => {
+    setFields((prev) => ({ ...prev, [key]: value }));
+
+    if (file) {
+      const billData = {
+        fileName: file.name,
+        type: file.type,
+        size: file.size,
+        uploadedAt: new Date().toISOString(),
+        ocrStatus: "complete",
+        parsedBill: {
+          ...fields,
+          [key]: value,
+        },
+      };
+      sessionStorage.setItem("billUpload", JSON.stringify(billData));
+    }
+  };
+
   const handleFileChange = async (event) => {
     const selected = event.target.files?.[0] || null;
     setFile(selected);
-    setParsed(null);
-    setOcrStatus("");
+    setStatus("");
 
     if (!selected) {
       sessionStorage.removeItem("billUpload");
-      return;
-    }
-
-    if (selected.type === "application/pdf") {
-      setOcrStatus(
-        "PDF upload is not OCR-ready in-browser. Please upload a JPG/PNG bill image for extraction.",
-      );
-      sessionStorage.setItem(
-        "billUpload",
-        JSON.stringify({
-          fileName: selected.name,
-          type: selected.type,
-          size: selected.size,
-          uploadedAt: new Date().toISOString(),
-          ocrStatus: "pdf-upload-only",
-        }),
-      );
+      setFields({
+        productName: "",
+        amount: "",
+        mrp: "",
+        discountPercent: "",
+        invoiceNumber: "",
+        date: "",
+      });
       return;
     }
 
     setIsProcessing(true);
 
     try {
-      const { data } = await Tesseract.recognize(selected, "eng", {
-        logger: (message) => {
-          if (message.status === "recognizing text") {
-            setOcrStatus(
-              `Scanning bill... ${Math.round(message.progress * 100)}%`,
-            );
-          }
-        },
+      const uploadFile = selected.type.startsWith("image/")
+        ? await shrinkImageIfNeeded(selected)
+        : selected;
+
+      const formData = new FormData();
+      formData.append("file", uploadFile);
+
+      const response = await fetch("/api/scan-bill", {
+        method: "POST",
+        body: formData,
       });
 
-      // Uncomment to debug how Tesseract splits the lines:
-      // console.log("OCR TEXT:\n", data.text);
+      const payload = await response.json();
+      if (!response.ok) {
+        throw new Error(payload?.error || "Could not scan this bill.");
+      }
 
-      const parsedBill = parseBillData(data.text);
-      setParsed(parsedBill);
-
-      const billData = {
-        fileName: selected.name,
-        type: selected.type,
-        size: selected.size,
-        uploadedAt: new Date().toISOString(),
-        ocrStatus: "complete",
-        ocrText: data.text,
-        parsedBill,
+      const parsedBill = {
+        productName: normalizeFieldValue(payload.productName),
+        amount: normalizeFieldValue(payload.amount),
+        mrp: normalizeFieldValue(payload.mrp),
+        discountPercent: normalizeFieldValue(payload.discountPercent),
+        invoiceNumber: normalizeFieldValue(payload.invoiceNumber),
+        date: normalizeFieldValue(payload.date),
       };
 
-      sessionStorage.setItem("billUpload", JSON.stringify(billData));
-      setOcrStatus("Bill scanned successfully.");
-    } catch (error) {
-      console.error("OCR failed:", error);
-      setOcrStatus(
-        "OCR could not read this bill. Please try another image or upload a clearer photo.",
+      setFields(parsedBill);
+      sessionStorage.setItem(
+        "billUpload",
+        JSON.stringify({
+          fileName: uploadFile.name,
+          type: uploadFile.type,
+          size: uploadFile.size,
+          uploadedAt: new Date().toISOString(),
+          ocrStatus: "complete",
+          parsedBill,
+        }),
       );
+
+      setStatus(
+        "Bill scanned successfully. You can edit the fields before continuing.",
+      );
+    } catch (error) {
+      console.error("Bill scan failed:", error);
+      setStatus(
+        "The bill could not be read reliably. Please upload a clearer photo or edit the extracted details manually.",
+      );
+      setFields({
+        productName: "",
+        amount: "",
+        mrp: "",
+        discountPercent: "",
+        invoiceNumber: "",
+        date: "",
+      });
       sessionStorage.setItem(
         "billUpload",
         JSON.stringify({
@@ -183,6 +187,17 @@ export default function UploadBillPage() {
 
   const handleContinue = () => {
     if (!file) return;
+
+    const finalBill = {
+      fileName: file.name,
+      type: file.type,
+      size: file.size,
+      uploadedAt: new Date().toISOString(),
+      ocrStatus: "complete",
+      parsedBill: { ...fields },
+    };
+
+    sessionStorage.setItem("billUpload", JSON.stringify(finalBill));
     router.push("/confirm");
   };
 
@@ -227,22 +242,46 @@ export default function UploadBillPage() {
             Upload a bill image or PDF to continue.
           </p>
 
-          {ocrStatus && (
+          {isProcessing && (
+            <div className="mt-4 flex items-center justify-center gap-3 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-3 text-sm text-[#4A4438]">
+              <span className="h-5 w-5 animate-spin rounded-full border-2 border-[#1C1B19] border-t-transparent" />
+              <span>Scanning bill...</span>
+            </div>
+          )}
+
+          {status && !isProcessing && (
             <p className="mt-4 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-2 text-left text-sm text-[#4A4438]">
-              {ocrStatus}
+              {status}
             </p>
           )}
 
-          {parsed && !isProcessing && (
-            <div className="mt-4 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-2 text-left text-sm text-[#4A4438]">
-              <p>
-                <span className="font-semibold">Product description:</span>{" "}
-                {parsed.productName || "Not detected"}
-              </p>
-              <p className="mt-2">
-                <span className="font-semibold">Amount:</span>{" "}
-                {parsed.amount ? `₹${parsed.amount}` : "Not detected"}
-              </p>
+          {file && !isProcessing && (
+            <div className="mt-4 space-y-3 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-3 text-left text-sm text-[#4A4438]">
+              <label className="block">
+                <span className="mb-1 block font-semibold">
+                  Product description
+                </span>
+                <input
+                  type="text"
+                  value={fields.productName}
+                  onChange={(event) =>
+                    updateField("productName", event.target.value)
+                  }
+                  className="w-full rounded border border-[#C4BDAC] bg-[#FBF8F2] px-3 py-2 text-[#1C1B19] outline-none focus:border-[#1C1B19]"
+                />
+              </label>
+
+              <label className="block">
+                <span className="mb-1 block font-semibold">Amount</span>
+                <input
+                  type="text"
+                  value={fields.amount}
+                  onChange={(event) =>
+                    updateField("amount", event.target.value)
+                  }
+                  className="w-full rounded border border-[#C4BDAC] bg-[#FBF8F2] px-3 py-2 text-[#1C1B19] outline-none focus:border-[#1C1B19]"
+                />
+              </label>
             </div>
           )}
         </div>
