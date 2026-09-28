@@ -115,9 +115,11 @@ export default function UploadBillPage() {
     setIsProcessing(true);
 
     try {
-      const uploadFile = selected.type.startsWith("image/")
-        ? await shrinkImageIfNeeded(selected)
-        : selected;
+      if (!selected.type.startsWith("image/")) {
+        throw new Error("Only image files are allowed for bill scanning.");
+      }
+
+      const uploadFile = await shrinkImageIfNeeded(selected);
 
       const formData = new FormData();
       formData.append("file", uploadFile);
@@ -231,15 +233,15 @@ export default function UploadBillPage() {
           <label className="block cursor-pointer rounded-lg border border-[#1C1B19] bg-[#FBF8F2] px-4 py-3 text-sm font-medium text-[#1C1B19]">
             <input
               type="file"
-              accept="image/*,.pdf"
+              accept="image/*"
               onChange={handleFileChange}
               className="hidden"
             />
-            {file ? `Selected: ${file.name}` : "Choose bill file"}
+            {file ? `Selected: ${file.name}` : "Choose bill image"}
           </label>
 
           <p className="mt-3 text-sm text-[#4A4438]">
-            Upload a bill image or PDF to continue.
+            Upload a clear bill image to continue.
           </p>
 
           {isProcessing && (

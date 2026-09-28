@@ -81,36 +81,25 @@ export async function POST(request) {
     const mimeType = file.type || "application/octet-stream";
     const base64Data = toBase64(buffer);
 
-    const supportedMediaType =
-      mimeType.startsWith("image/") || mimeType === "application/pdf";
+    const supportedMediaType = mimeType.startsWith("image/");
 
     if (!supportedMediaType) {
       return NextResponse.json(
         {
-          error: "Unsupported file type. Please upload an image or PDF bill.",
+          error: "Only image files are supported for bill scanning.",
         },
         { status: 400 },
       );
     }
 
-    const contentPart =
-      mimeType === "application/pdf"
-        ? {
-            type: "document",
-            source: {
-              type: "base64",
-              media_type: "application/pdf",
-              data: base64Data,
-            },
-          }
-        : {
-            type: "image",
-            source: {
-              type: "base64",
-              media_type: mimeType,
-              data: base64Data,
-            },
-          };
+    const contentPart = {
+      type: "image",
+      source: {
+        type: "base64",
+        media_type: mimeType,
+        data: base64Data,
+      },
+    };
 
     const response = await fetch(ANTHROPIC_API_URL, {
       method: "POST",
