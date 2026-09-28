@@ -62,22 +62,16 @@ export default function ConfirmPage() {
                 <span className="font-semibold">OCR status:</span>{" "}
                 {bill.ocrStatus || "Not scanned"}
               </p>
+              {bill.parsedBill?.productName && (
+                <p>
+                  <span className="font-semibold">Product description:</span>{" "}
+                  {bill.parsedBill.productName}
+                </p>
+              )}
               {bill.parsedBill?.amount && (
                 <p>
-                  <span className="font-semibold">Amount detected:</span> ₹
+                  <span className="font-semibold">Amount:</span> ₹
                   {bill.parsedBill.amount}
-                </p>
-              )}
-              {bill.parsedBill?.invoiceNumber && (
-                <p>
-                  <span className="font-semibold">Invoice no:</span>{" "}
-                  {bill.parsedBill.invoiceNumber}
-                </p>
-              )}
-              {bill.parsedBill?.billDate && (
-                <p>
-                  <span className="font-semibold">Bill date:</span>{" "}
-                  {bill.parsedBill.billDate}
                 </p>
               )}
             </>

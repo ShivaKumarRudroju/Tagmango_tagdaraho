@@ -4,46 +4,86 @@ import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 import Tesseract from "tesseract.js";
 
+const AMOUNT_REGEX = /\b\d{1,3}(?:,\d{3})*\.\d{2}\b/;
+
 function parseBillData(rawText) {
   const text = (rawText || "").replace(/\r/g, " ").replace(/\s+/g, " ").trim();
-  const normalized = text.toLowerCase();
 
-  const amountMatch =
-    text.match(
-      /(?:total(?:\s+amount)?|grand\s+total|amount\s+due|net\s+amount|balance\s+due|total due)\D{0,30}([₹$€£]?\s?\d[\d,]*\.?\d{0,2})/i,
-    ) ||
-    text.match(/(?:₹|rs\.?|inr)\s*([\d,]+\.?\d{0,2})/i) ||
-    text.match(/([\d,]+\.?\d{0,2})\s*(?:rs\.?|inr|₹)/i);
-
-  const dateMatch =
-    text.match(
-      /(?:bill\s*date|date|invoice\s*date)\D{0,20}(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/i,
-    ) || text.match(/(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})/);
-
-  const invoiceMatch =
-    text.match(
-      /(?:invoice|bill|receipt|order|voucher)(?:\s*(?:no|#|number))?\D{0,15}([A-Za-z0-9\-/]+)/i,
-    ) || text.match(/(?:inv|bill)\s*[:#-]?\s*([A-Za-z0-9\-/]+)/i);
-
-  const merchantLine = text
+  const lines = (rawText || "")
     .split(/\n|\r/)
-    .map((line) => line.trim())
-    .find(
-      (line) =>
-        line &&
-        !/^(invoice|bill|receipt|date|total|amount|tax|gst|hsn|cgst|sgst|qty|qty\s*|subtotal|balance|paid|due)$/i.test(
-          line,
-        ) &&
-        line.length > 3,
+    .map((line) => line.replace(/\s+/g, " ").trim())
+    .filter(Boolean);
+
+  // 1. Locate the item table: header row -> first totals row
+  const headerIdx = lines.findIndex(
+    (l) => /description/i.test(l) && /(hsn|qty|amount)/i.test(l),
+  );
+  const endIdx =
+    headerIdx === -1
+      ? -1
+      : lines.findIndex(
+          (l, i) =>
+            i > headerIdx &&
+            /^(taxable|sub\s*total|total|discount|cgst|sgst|igst)/i.test(l),
+        );
+
+  let productName = null;
+  let amount = null;
+  let hsn = null;
+
+  if (headerIdx !== -1 && endIdx > headerIdx + 1) {
+    // Join all wrapped lines of the item row(s)
+    let block = lines.slice(headerIdx + 1, endIdx).join(" ");
+
+    // Amount: decimal number like 699.00 (first one in the row)
+    const amountMatch = block.match(AMOUNT_REGEX);
+    if (amountMatch) {
+      amount = amountMatch[0].replace(/,/g, "");
+      block = block.replace(amountMatch[0], " ");
+    }
+
+    // HSN/SAC: standalone 4-8 digit number
+    const hsnMatch = block.match(/\b\d{4,8}\b/);
+    if (hsnMatch) {
+      hsn = hsnMatch[0];
+      block = block.replace(hsnMatch[0], " ");
+    }
+
+    productName = block
+      .replace(/^[\s|#]*\d{1,2}[\s.|)]+/, "") // leading row number "1"
+      .replace(/[|]/g, " ") // stray table borders OCR picks up
+      .replace(/\s+/g, " ")
+      .trim();
+
+    if (productName.length < 4) productName = null;
+  }
+
+  // 2. Fallback: keyword-based search if the table wasn't found
+  if (!productName) {
+    const line = lines.find((l) =>
+      /(membership|workout|session|trial|fitness|gym|package|course|service)/i.test(
+        l,
+      ),
     );
+    if (line) {
+      const amountMatch = line.match(AMOUNT_REGEX);
+      if (amountMatch && !amount) amount = amountMatch[0].replace(/,/g, "");
+
+      productName = line
+        .replace(/^\d{1,2}\s+/, "")
+        .replace(/\b\d{4,8}\b/g, "")
+        .replace(/\b\d{1,3}(?:,\d{3})*\.\d{2}\b/g, "")
+        .replace(/\s+/g, " ")
+        .trim();
+    }
+  }
 
   return {
     rawText: text,
-    amount: amountMatch ? amountMatch[1].replace(/[^\d.]/g, "") : null,
-    invoiceNumber: invoiceMatch ? invoiceMatch[1].trim() : null,
-    billDate: dateMatch ? dateMatch[1].trim() : null,
-    merchant: merchantLine || null,
-    textPreview: normalized.slice(0, 500),
+    productName,
+    amount,
+    hsn,
+    textPreview: text.toLowerCase().slice(0, 500),
   };
 }
 
@@ -51,6 +91,7 @@ export default function UploadBillPage() {
   const router = useRouter();
   const [lead, setLead] = useState(null);
   const [file, setFile] = useState(null);
+  const [parsed, setParsed] = useState(null);
   const [isProcessing, setIsProcessing] = useState(false);
   const [ocrStatus, setOcrStatus] = useState("");
 
@@ -64,6 +105,7 @@ export default function UploadBillPage() {
   const handleFileChange = async (event) => {
     const selected = event.target.files?.[0] || null;
     setFile(selected);
+    setParsed(null);
     setOcrStatus("");
 
     if (!selected) {
@@ -101,7 +143,12 @@ export default function UploadBillPage() {
         },
       });
 
+      // Uncomment to debug how Tesseract splits the lines:
+      // console.log("OCR TEXT:\n", data.text);
+
       const parsedBill = parseBillData(data.text);
+      setParsed(parsedBill);
+
       const billData = {
         fileName: selected.name,
         type: selected.type,
@@ -186,23 +233,18 @@ export default function UploadBillPage() {
             </p>
           )}
 
-          {file &&
-            file.type !== "application/pdf" &&
-            !isProcessing &&
-            sessionStorage.getItem("billUpload") && (
-              <div className="mt-4 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-2 text-left text-sm text-[#4A4438]">
-                <p>
-                  <span className="font-semibold">Detected amount:</span>{" "}
-                  {JSON.parse(sessionStorage.getItem("billUpload"))?.parsedBill
-                    ?.amount || "Not detected"}
-                </p>
-                <p>
-                  <span className="font-semibold">Invoice no:</span>{" "}
-                  {JSON.parse(sessionStorage.getItem("billUpload"))?.parsedBill
-                    ?.invoiceNumber || "Not detected"}
-                </p>
-              </div>
-            )}
+          {parsed && !isProcessing && (
+            <div className="mt-4 rounded-md border border-[#C4BDAC] bg-[#F5F1E8] px-3 py-2 text-left text-sm text-[#4A4438]">
+              <p>
+                <span className="font-semibold">Product description:</span>{" "}
+                {parsed.productName || "Not detected"}
+              </p>
+              <p className="mt-2">
+                <span className="font-semibold">Amount:</span>{" "}
+                {parsed.amount ? `₹${parsed.amount}` : "Not detected"}
+              </p>
+            </div>
+          )}
         </div>
 
         <button

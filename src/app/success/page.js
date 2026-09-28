@@ -1,9 +1,25 @@
 "use client";
 
+import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
 
 export default function SuccessPage() {
   const router = useRouter();
+  const [productName, setProductName] = useState("your course");
+
+  useEffect(() => {
+    const rawBill = sessionStorage.getItem("billUpload");
+    if (rawBill) {
+      try {
+        const bill = JSON.parse(rawBill);
+        if (bill?.parsedBill?.productName) {
+          setProductName(bill.parsedBill.productName);
+        }
+      } catch (error) {
+        console.error("Failed to read product name from bill upload", error);
+      }
+    }
+  }, []);
 
   return (
     <main className="flex min-h-screen items-center justify-center bg-[#EDE7D8] px-4 py-12 font-sans text-[#1C1B19]">
@@ -11,9 +27,10 @@ export default function SuccessPage() {
         <p className="font-mono text-xs uppercase tracking-[0.18em] text-[#8C8577]">
           Step 4 of 4
         </p>
-        <h1 className="mt-3 text-4xl font-semibold">Submitted</h1>
+        <h1 className="mt-3 text-4xl font-semibold">Congratulations!</h1>
         <p className="mt-4 text-lg text-[#4A4438]">
-          Your bill and details were saved successfully.
+          You&apos;ve unlocked your free Tagda Raho course for{" "}
+          <strong>{productName}</strong>.
         </p>
 
         <button
